@@ -22,10 +22,10 @@ The OWASP Amass Project performs network mapping of attack surfaces and external
 | Technique    | Data Sources |
 |:-------------|:-------------|
 | DNS          | Brute forcing, Reverse DNS sweeping, FQDN alterations/permutations, FQDN Similarity-based Guessing, Zone transfers |
-| Scraping     | Ask, Baidu, Bing, DNSDumpster, DNSTable, Dogpile, Exalead, HackerOne, IPv4Info, Netcraft, RapidDNS, Riddler, SiteDossier, ViewDNS, Yahoo |
-| Certificates | Active pulls (optional), Censys, CertSpotter, Crtsh, Entrust, GoogleCT |
-| APIs         | AlienVault, BinaryEdge, BufferOver, CIRCL, CommonCrawl, DNSDB, GitHub, HackerTarget, IPToASN, Mnemonic, NetworksDB, PassiveTotal, Pastebin, RADb, Robtex, SecurityTrails, ShadowServer, Shodan, Spyse (CertDB & FindSubdomains), Sublist3rAPI, TeamCymru, ThreatCrowd, Twitter, Umbrella, URLScan, VirusTotal, WhoisXML |
-| Web Archives | ArchiveIt, ArchiveToday, Arquivo, LoCArchive, OpenUKArchive, UKGovArchive, Wayback |
+| Scraping     | Ask, Baidu, Bing, BuiltWith, DNSDumpster, DNSTable, HackerOne, RapidDNS, Riddler, SiteDossier, ViewDNS, Yahoo |
+| Certificates | Active pulls (optional), Censys, CertSpotter, Crtsh, FacebookCT, GoogleCT |
+| APIs         | AlienVault, BinaryEdge, BufferOver, C99, CIRCL, CommonCrawl, DNSDB, GitHub, HackerTarget, IPToASN, Mnemonic, NetworksDB, PassiveTotal, Pastebin, RADb, Robtex, SecurityTrails, ShadowServer, Shodan, Spyse, Sublist3rAPI, TeamCymru, ThreatCrowd, ThreatMiner, Twitter, Umbrella, URLScan, VirusTotal, WhoisXML, ZETAlytics |
+| Web Archives | ArchiveIt, LoCArchive, UKGovArchive, Wayback |
 
 ----
 
@@ -81,11 +81,13 @@ Go to the [User's Guide](./doc/user_guide.md) for additional information.
 
 See the [Tutorial](./doc/tutorial.md) for example usage.
 
+See the [Amass Scripting Engine Manual](./doc/scripting.md) for greater control over your enumeration process.
+
 ## Troubleshooting [![Chat on Discord](https://img.shields.io/discord/433729817918308352.svg?logo=discord)](https://discord.gg/rtN8GMd)
 
 If you need help with installation and/or usage of the tool, please join our [Discord server](https://discord.gg/rtN8GMd) where community members can best try to help you.
 
-:stop_sign: **Please avoid opening GitHub issues for support requests or questions!**
+:stop_sign:   **Please avoid opening GitHub issues for support requests or questions!**
 
 ## Contributing [![Contribute Yes](https://img.shields.io/badge/contribute-yes-brightgreen.svg)](./CONTRIBUTING.md) [![Chat on Discord](https://img.shields.io/discord/433729817918308352.svg?logo=discord)](https://discord.gg/rtN8GMd)
 
