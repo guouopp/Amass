@@ -31,7 +31,6 @@ const (
 
 var (
 	networksdbASNLinkRE    = regexp.MustCompile(`Announcing ASN:<\/b> <a class="link_sm" href="(.*)"`)
-	networksdbOrgLinkRE    = regexp.MustCompile(`ISP\/Organisation:<\/b> <a class="link_sm" href="(.*)"`)
 	networksdbIPLinkRE     = regexp.MustCompile(`<a class="link_sm" href="(\/ip\/[.:a-zA-Z0-9]+)">`)
 	networksdbASNRE        = regexp.MustCompile(`AS Number:<\/b> ([0-9]*)<br>`)
 	networksdbCIDRRE       = regexp.MustCompile(`CIDR:<\/b>(.*)<br>`)
@@ -46,9 +45,9 @@ var (
 type NetworksDB struct {
 	requests.BaseService
 
-	API        *config.APIKey
 	SourceType string
 	sys        systems.System
+	creds      *config.Credentials
 	hasAPIKey  bool
 }
 
@@ -73,8 +72,8 @@ func (n *NetworksDB) Type() string {
 func (n *NetworksDB) OnStart() error {
 	n.BaseService.OnStart()
 
-	n.API = n.sys.Config().GetAPIKey(n.String())
-	if n.API == nil || n.API.Key == "" {
+	n.creds = n.sys.Config().GetDataSourceConfig(n.String()).GetCredentials()
+	if n.creds == nil || n.creds.Key == "" {
 		n.sys.Config().Log.Printf("%s: API key data was not provided", n.String())
 		n.SourceType = requests.SCRAPE
 		n.hasAPIKey = false
@@ -96,8 +95,6 @@ func (n *NetworksDB) OnASNRequest(ctx context.Context, req *requests.ASNRequest)
 	}
 
 	n.CheckRateLimit()
-	bus.Publish(requests.SetActiveTopic, eventbus.PriorityCritical, n.String())
-
 	if n.hasAPIKey {
 		if req.Address != "" {
 			n.executeAPIASNAddrQuery(ctx, req.Address)
@@ -562,7 +559,7 @@ func (n *NetworksDB) getHeaders() map[string]string {
 	}
 
 	return map[string]string{
-		"X-Api-Key":    n.API.Key,
+		"X-Api-Key":    n.creds.Key,
 		"Content-Type": "application/x-www-form-urlencoded",
 	}
 }

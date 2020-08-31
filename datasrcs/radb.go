@@ -8,12 +8,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/OWASP/Amass/v3/eventbus"
+	amassnet "github.com/OWASP/Amass/v3/net"
 	"github.com/OWASP/Amass/v3/net/http"
 	"github.com/OWASP/Amass/v3/requests"
 	"github.com/OWASP/Amass/v3/resolvers"
@@ -97,8 +97,6 @@ func (r *RADb) OnASNRequest(ctx context.Context, req *requests.ASNRequest) {
 	}
 
 	r.CheckRateLimit()
-	bus.Publish(requests.SetActiveTopic, eventbus.PriorityCritical, r.String())
-
 	if req.Address != "" {
 		r.executeASNAddrQuery(ctx, req.Address)
 		return
@@ -154,7 +152,6 @@ func (r *RADb) executeASNAddrQuery(ctx context.Context, addr string) {
 	cidr := prefix + "/" + strconv.Itoa(m.CIDRs[0].Length)
 	if asn := r.ipToASN(ctx, cidr); asn != 0 {
 		r.CheckRateLimit()
-		bus.Publish(requests.SetActiveTopic, eventbus.PriorityCritical, r.String())
 		r.executeASNQuery(ctx, asn, addr, cidr)
 	}
 }
@@ -218,8 +215,6 @@ func (r *RADb) executeASNQuery(ctx context.Context, asn int, addr, prefix string
 	}
 
 	r.CheckRateLimit()
-	bus.Publish(requests.SetActiveTopic, eventbus.PriorityCritical, r.String())
-
 	blocks := stringset.New()
 	if prefix != "" {
 		blocks.Insert(prefix)
@@ -260,8 +255,6 @@ func (r *RADb) netblocks(ctx context.Context, asn int) stringset.Set {
 	}
 
 	r.CheckRateLimit()
-	bus.Publish(requests.SetActiveTopic, eventbus.PriorityCritical, r.String())
-
 	url := r.getNetblocksURL(strconv.Itoa(asn))
 	headers := map[string]string{"Content-Type": "application/json"}
 	page, err := http.RequestWebPage(url, nil, headers, "", "")
@@ -330,8 +323,6 @@ func (r *RADb) ipToASN(ctx context.Context, cidr string) int {
 	}
 
 	r.CheckRateLimit()
-	bus.Publish(requests.SetActiveTopic, eventbus.PriorityCritical, r.String())
-
 	if r.addr == "" {
 		answers, _, err := r.sys.Pool().Resolve(ctx, radbWhoisURL, "A", resolvers.PriorityHigh)
 		if err != nil {
@@ -352,8 +343,7 @@ func (r *RADb) ipToASN(ctx context.Context, cidr string) int {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	d := net.Dialer{}
-	conn, err := d.DialContext(ctx, "tcp", r.addr+":43")
+	conn, err := amassnet.DialContext(ctx, "tcp", r.addr+":43")
 	if err != nil {
 		bus.Publish(requests.LogTopic, eventbus.PriorityHigh, fmt.Sprintf("%s: %v", r.String(), err))
 		return 0

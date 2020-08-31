@@ -6,6 +6,7 @@ package datasrcs
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -23,9 +24,9 @@ import (
 type Twitter struct {
 	requests.BaseService
 
-	API        *config.APIKey
 	SourceType string
 	sys        systems.System
+	creds      *config.Credentials
 	client     *twitter.Client
 }
 
@@ -49,21 +50,34 @@ func (t *Twitter) Type() string {
 func (t *Twitter) OnStart() error {
 	t.BaseService.OnStart()
 
-	t.API = t.sys.Config().GetAPIKey(t.String())
-	if t.API == nil || t.API.Key == "" || t.API.Secret == "" {
+	t.creds = t.sys.Config().GetDataSourceConfig(t.String()).GetCredentials()
+	if t.creds == nil || t.creds.Key == "" || t.creds.Secret == "" {
 		t.sys.Config().Log.Printf("%s: API key data was not provided", t.String())
 	} else {
 		if bearer, err := t.getBearerToken(); err == nil {
 			config := &oauth2.Config{}
 			token := &oauth2.Token{AccessToken: bearer}
 			// OAuth2 http.Client will automatically authorize Requests
-			httpClient := config.Client(oauth2.NoContext, token)
+			httpClient := config.Client(context.Background(), token)
 			// Twitter client
 			t.client = twitter.NewClient(httpClient)
 		}
 	}
 
 	t.SetRateLimit(3 * time.Second)
+	return nil
+}
+
+// CheckConfig implements the Service interface.
+func (t *Twitter) CheckConfig() error {
+	creds := t.sys.Config().GetDataSourceConfig(t.String()).GetCredentials()
+
+	if creds == nil || creds.Key == "" || creds.Secret == "" {
+		estr := fmt.Sprintf("%s: check callback failed for the configuration", t.String())
+		t.sys.Config().Log.Print(estr)
+		return errors.New(estr)
+	}
+
 	return nil
 }
 
@@ -99,23 +113,13 @@ func (t *Twitter) OnDNSRequest(ctx context.Context, req *requests.DNSRequest) {
 		// URLs in the tweet body
 		for _, urlEntity := range tweet.Entities.Urls {
 			for _, name := range re.FindAllString(urlEntity.ExpandedURL, -1) {
-				bus.Publish(requests.NewNameTopic, eventbus.PriorityHigh, &requests.DNSRequest{
-					Name:   name,
-					Domain: req.Domain,
-					Tag:    t.SourceType,
-					Source: t.String(),
-				})
+				genNewNameEvent(ctx, t.sys, t, name)
 			}
 		}
 
 		// Source of the tweet
 		for _, name := range re.FindAllString(tweet.Source, -1) {
-			bus.Publish(requests.NewNameTopic, eventbus.PriorityHigh, &requests.DNSRequest{
-				Name:   name,
-				Domain: req.Domain,
-				Tag:    t.SourceType,
-				Source: t.String(),
-			})
+			genNewNameEvent(ctx, t.sys, t, name)
 		}
 	}
 }
@@ -125,7 +129,7 @@ func (t *Twitter) getBearerToken() (string, error) {
 	page, err := http.RequestWebPage(
 		"https://api.twitter.com/oauth2/token",
 		strings.NewReader("grant_type=client_credentials"),
-		headers, t.API.Key, t.API.Secret)
+		headers, t.creds.Key, t.creds.Secret)
 	if err != nil {
 		return "", fmt.Errorf("token request failed: %+v", err)
 	}

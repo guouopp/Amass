@@ -7,11 +7,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 
 	"github.com/OWASP/Amass/v3/config"
 	"github.com/OWASP/Amass/v3/eventbus"
 	"github.com/OWASP/Amass/v3/net/dns"
 	"github.com/OWASP/Amass/v3/requests"
+	"github.com/OWASP/Amass/v3/stringfilter"
 	"github.com/OWASP/Amass/v3/systems"
 	luaurl "github.com/cjoudrey/gluaurl"
 	lua "github.com/yuin/gopher-lua"
@@ -28,22 +30,34 @@ type Script struct {
 	// Script callback functions
 	start      lua.LValue
 	stop       lua.LValue
+	check      lua.LValue
 	vertical   lua.LValue
 	horizontal lua.LValue
 	address    lua.LValue
 	asn        lua.LValue
 	resolved   lua.LValue
 	subdomain  lua.LValue
+	// Regexp to match any subdomain name
+	subre  *regexp.Regexp
+	filter *stringfilter.StringFilter
 }
 
 // NewScript returns he object initialized, but not yet started.
 func NewScript(script string, sys systems.System) *Script {
-	s := &Script{sys: sys}
+	re, err := regexp.Compile(dns.AnySubdomainRegexString())
+	if err != nil {
+		return nil
+	}
+
+	s := &Script{
+		sys:   sys,
+		subre: re,
+	}
 	L := s.newLuaState(sys.Config())
 	s.luaState = L
 
 	// Load the script
-	err := L.DoString(script)
+	err = L.DoString(script)
 	if err != nil {
 		msg := fmt.Sprintf("Script: Failed to load script: %v", err)
 
@@ -70,8 +84,6 @@ func NewScript(script string, sys systems.System) *Script {
 	}
 	s.BaseService = *requests.NewBaseService(s, name)
 
-	// Acquire API authentication info and make it global in the script
-	s.registerAPIKey(L, sys.Config())
 	// Save references to the callbacks defined within the script
 	s.getScriptCallbacks()
 	return s
@@ -84,6 +96,7 @@ func (s *Script) newLuaState(cfg *config.Config) *lua.LState {
 	L.PreloadModule("url", luaurl.Loader)
 	L.PreloadModule("json", luajson.Loader)
 	L.SetGlobal("config", L.NewFunction(s.config))
+	L.SetGlobal("datasrc_config", L.NewFunction(s.dataSourceConfig))
 	L.SetGlobal("brute_wordlist", L.NewFunction(s.bruteWordlist))
 	L.SetGlobal("alt_wordlist", L.NewFunction(s.altWordlist))
 	L.SetGlobal("log", L.NewFunction(s.log))
@@ -107,39 +120,13 @@ func (s *Script) newLuaState(cfg *config.Config) *lua.LState {
 	return L
 }
 
-// Fetch provided API authentication information and provide to the script as a global table.
-func (s *Script) registerAPIKey(L *lua.LState, cfg *config.Config) {
-	api := cfg.GetAPIKey(s.String())
-	if api == nil {
-		return
-	}
-
-	tb := L.NewTable()
-	if api.Username != "" {
-		tb.RawSetString("username", lua.LString(api.Username))
-	}
-	if api.Password != "" {
-		tb.RawSetString("password", lua.LString(api.Password))
-	}
-	if api.Key != "" {
-		tb.RawSetString("key", lua.LString(api.Key))
-	}
-	if api.Secret != "" {
-		tb.RawSetString("secret", lua.LString(api.Secret))
-	}
-	if api.TTL != 0 {
-		tb.RawSetString("ttl", lua.LNumber(api.TTL))
-	}
-
-	L.SetGlobal("api", tb)
-}
-
 // Save references to the script functions that serve as callbacks for Amass events.
 func (s *Script) getScriptCallbacks() {
 	L := s.luaState
 
 	s.start = L.GetGlobal("start")
 	s.stop = L.GetGlobal("stop")
+	s.check = L.GetGlobal("check")
 	s.vertical = L.GetGlobal("vertical")
 	s.horizontal = L.GetGlobal("horizontal")
 	s.address = L.GetGlobal("address")
@@ -230,6 +217,39 @@ func (s *Script) OnStop() error {
 	return nil
 }
 
+// CheckConfig implements the Service interface.
+func (s *Script) CheckConfig() error {
+	L := s.luaState
+
+	if s.check.Type() == lua.LTNil {
+		return nil
+	}
+
+	err := L.CallByParam(lua.P{
+		Fn:      s.check,
+		NRet:    1,
+		Protect: true,
+	})
+	if err != nil {
+		estr := fmt.Sprintf("%s: check callback: %v", s.String(), err)
+
+		s.sys.Config().Log.Print(estr)
+		return errors.New(estr)
+	}
+
+	ret := L.Get(-1)
+	L.Pop(1)
+
+	passed, ok := ret.(lua.LBool)
+	if ok && bool(passed) {
+		return nil
+	}
+
+	estr := fmt.Sprintf("%s: check callback failed for the configuration", s.String())
+	s.sys.Config().Log.Print(estr)
+	return errors.New(estr)
+}
+
 // OnDNSRequest implements the Service interface.
 func (s *Script) OnDNSRequest(ctx context.Context, req *requests.DNSRequest) {
 	L := s.luaState
@@ -248,6 +268,8 @@ func (s *Script) OnDNSRequest(ctx context.Context, req *requests.DNSRequest) {
 	bus.Publish(requests.SetActiveTopic, eventbus.PriorityCritical, s.String())
 	bus.Publish(requests.LogTopic, eventbus.PriorityHigh,
 		fmt.Sprintf("Querying %s for %s subdomains", s.String(), req.Domain))
+	// Create a new filter specific to this request
+	s.filter = stringfilter.NewStringFilter()
 
 	err := L.CallByParam(lua.P{
 		Fn:      s.vertical,
@@ -259,6 +281,8 @@ func (s *Script) OnDNSRequest(ctx context.Context, req *requests.DNSRequest) {
 		bus.Publish(requests.LogTopic, eventbus.PriorityHigh,
 			fmt.Sprintf("%s: vertical callback: %v", s.String(), err))
 	}
+
+	s.filter = nil
 }
 
 // OnResolved implements the Service interface.
@@ -286,6 +310,9 @@ func (s *Script) OnResolved(ctx context.Context, req *requests.DNSRequest) {
 	}
 
 	s.CheckRateLimit()
+	// Create a new filter specific to this request
+	s.filter = stringfilter.NewStringFilter()
+
 	err := L.CallByParam(lua.P{
 		Fn:      s.resolved,
 		NRet:    0,
@@ -296,6 +323,8 @@ func (s *Script) OnResolved(ctx context.Context, req *requests.DNSRequest) {
 		bus.Publish(requests.LogTopic, eventbus.PriorityHigh,
 			fmt.Sprintf("%s: resolved callback: %v", s.String(), err))
 	}
+
+	s.filter = nil
 }
 
 // OnSubdomainDiscovered implements the Service interface.
@@ -313,6 +342,9 @@ func (s *Script) OnSubdomainDiscovered(ctx context.Context, req *requests.DNSReq
 	}
 
 	s.CheckRateLimit()
+	// Create a new filter specific to this request
+	s.filter = stringfilter.NewStringFilter()
+
 	err := L.CallByParam(lua.P{
 		Fn:      s.subdomain,
 		NRet:    0,
@@ -323,6 +355,8 @@ func (s *Script) OnSubdomainDiscovered(ctx context.Context, req *requests.DNSReq
 		bus.Publish(requests.LogTopic, eventbus.PriorityHigh,
 			fmt.Sprintf("%s: subdomain callback: %v", s.String(), err))
 	}
+
+	s.filter = nil
 }
 
 // OnAddrRequest implements the Service interface.
@@ -341,6 +375,8 @@ func (s *Script) OnAddrRequest(ctx context.Context, req *requests.AddrRequest) {
 
 	s.CheckRateLimit()
 	bus.Publish(requests.SetActiveTopic, eventbus.PriorityCritical, s.String())
+	// Create a new filter specific to this request
+	s.filter = stringfilter.NewStringFilter()
 
 	err := L.CallByParam(lua.P{
 		Fn:      s.address,
@@ -352,6 +388,8 @@ func (s *Script) OnAddrRequest(ctx context.Context, req *requests.AddrRequest) {
 		bus.Publish(requests.LogTopic, eventbus.PriorityHigh,
 			fmt.Sprintf("%s: address callback: %v", s.String(), err))
 	}
+
+	s.filter = nil
 }
 
 // OnASNRequest implements the Service interface.

@@ -7,6 +7,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -23,15 +24,15 @@ import (
 type DNSDB struct {
 	requests.BaseService
 
-	API        *config.APIKey
 	SourceType string
 	sys        systems.System
+	creds      *config.Credentials
 }
 
 // NewDNSDB returns he object initialized, but not yet started.
 func NewDNSDB(sys systems.System) *DNSDB {
 	d := &DNSDB{
-		SourceType: requests.SCRAPE,
+		SourceType: requests.API,
 		sys:        sys,
 	}
 
@@ -48,12 +49,25 @@ func (d *DNSDB) Type() string {
 func (d *DNSDB) OnStart() error {
 	d.BaseService.OnStart()
 
-	d.API = d.sys.Config().GetAPIKey(d.String())
-	if d.API == nil || d.API.Key == "" {
+	d.creds = d.sys.Config().GetDataSourceConfig(d.String()).GetCredentials()
+	if d.creds == nil || d.creds.Key == "" {
 		d.sys.Config().Log.Printf("%s: API key data was not provided", d.String())
 	}
 
 	d.SetRateLimit(2 * time.Minute)
+	return nil
+}
+
+// CheckConfig implements the Service interface.
+func (d *DNSDB) CheckConfig() error {
+	creds := d.sys.Config().GetDataSourceConfig(d.String()).GetCredentials()
+
+	if creds == nil || creds.Key == "" {
+		estr := fmt.Sprintf("%s: check callback failed for the configuration", d.String())
+		d.sys.Config().Log.Print(estr)
+		return errors.New(estr)
+	}
+
 	return nil
 }
 
@@ -69,7 +83,7 @@ func (d *DNSDB) OnDNSRequest(ctx context.Context, req *requests.DNSRequest) {
 		return
 	}
 
-	if d.API == nil || d.API.Key == "" {
+	if d.creds == nil || d.creds.Key == "" {
 		return
 	}
 
@@ -78,7 +92,7 @@ func (d *DNSDB) OnDNSRequest(ctx context.Context, req *requests.DNSRequest) {
 		fmt.Sprintf("Querying %s for %s subdomains", d.String(), req.Domain))
 
 	headers := map[string]string{
-		"X-API-Key":    d.API.Key,
+		"X-API-Key":    d.creds.Key,
 		"Accept":       "application/json",
 		"Content-Type": "application/json",
 	}
@@ -91,12 +105,7 @@ func (d *DNSDB) OnDNSRequest(ctx context.Context, req *requests.DNSRequest) {
 	}
 
 	for _, name := range d.parse(ctx, page, req.Domain) {
-		bus.Publish(requests.NewNameTopic, eventbus.PriorityHigh, &requests.DNSRequest{
-			Name:   name,
-			Domain: req.Domain,
-			Tag:    requests.API,
-			Source: d.String(),
-		})
+		genNewNameEvent(ctx, d.sys, d, name)
 	}
 }
 

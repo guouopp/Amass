@@ -4,9 +4,11 @@
 package resolvers
 
 import (
+	"context"
 	"net"
 	"time"
 
+	amassnet "github.com/OWASP/Amass/v3/net"
 	"github.com/miekg/dns"
 )
 
@@ -152,16 +154,6 @@ func (r *BaseResolver) updateStat(rcode int, value int64) {
 	}
 }
 
-func (r *BaseResolver) getStat(stat int) int64 {
-	ch := make(chan int64, 2)
-
-	r.stateChannels.GetStat <- &getResolverStat{
-		Stat: stat,
-		Ch:   ch,
-	}
-	return <-ch
-}
-
 // Stats returns performance counters.
 func (r *BaseResolver) Stats() map[int]int64 {
 	ch := make(chan map[int]int64, 2)
@@ -214,7 +206,7 @@ func initXchgsManagement() *xchgsChans {
 }
 
 func manageXchgState(chs *xchgsChans) {
-	var timeouts []uint16
+	timeouts := make(map[uint16]struct{})
 	xchgs := make(map[uint16]*resolveRequest)
 
 	for {
@@ -222,34 +214,18 @@ func manageXchgState(chs *xchgsChans) {
 		case <-chs.Done:
 			return
 		case c := <-chs.GetID:
-			var id uint16
-			for {
-				id = dns.Id()
-				if _, found := xchgs[id]; !found {
-					xchgs[id] = &resolveRequest{Timestamp: time.Now()}
-					break
-				}
-			}
-			c <- id
+			c <- nextID(xchgs)
 		case addTimeout := <-chs.AddTimeout:
-			timeouts = append(timeouts, addTimeout)
+			timeouts[addTimeout] = struct{}{}
 		case delTimeout := <-chs.DelTimeout:
-			var n int
-			// Remove the element identified by id
-			for _, i := range timeouts {
-				if i != delTimeout {
-					timeouts[n] = i
-					n++
-				}
-			}
-			timeouts = timeouts[:n]
+			delete(timeouts, delTimeout)
 		case ut := <-chs.UpdateTimeout:
 			if req, found := xchgs[ut.ID]; found {
 				req.Timestamp = ut.Timeout
 			}
 		case all := <-chs.AllTimeoutIDs:
 			var ids []uint16
-			for _, id := range timeouts {
+			for id := range timeouts {
 				ids = append(ids, id)
 			}
 			all <- ids
@@ -257,9 +233,10 @@ func manageXchgState(chs *xchgsChans) {
 			xchgs[addReq.ID] = addReq
 		case pReq := <-chs.PullRequest:
 			tPassed := true
-			r, found := xchgs[pReq.ID]
 
-			if found && pReq.Timeout != 0 && time.Now().Before(r.Timestamp.Add(pReq.Timeout)) {
+			r, found := xchgs[pReq.ID]
+			if !found || (pReq.Timeout != 0 &&
+				time.Now().Before(r.Timestamp.Add(pReq.Timeout))) {
 				tPassed = false
 			}
 
@@ -271,6 +248,27 @@ func manageXchgState(chs *xchgsChans) {
 			}
 		}
 	}
+}
+
+func nextID(xchgs map[uint16]*resolveRequest) uint16 {
+	id := dns.Id()
+	var largest uint16 = (1 << 16) - 1
+
+	for i := id; i <= largest; i++ {
+		if _, found := xchgs[i]; !found {
+			xchgs[i] = &resolveRequest{Timestamp: time.Now()}
+			return i
+		}
+	}
+
+	for i := id - 1; i >= 0; i-- {
+		if _, found := xchgs[i]; !found {
+			xchgs[i] = &resolveRequest{Timestamp: time.Now()}
+			return i
+		}
+	}
+
+	return 0
 }
 
 func (r *BaseResolver) addTimeout(id uint16) {
@@ -331,15 +329,6 @@ func (r *BaseResolver) pullRequestAfterTimeout(id uint16, timeout time.Duration)
 	return req
 }
 
-func (r *BaseResolver) updateRequestTimeout(id uint16, timeout time.Time) {
-	r.delTimeout(id)
-	r.xchgsChannels.UpdateTimeout <- &updateTimeoutMsg{
-		ID:      id,
-		Timeout: timeout,
-	}
-	r.addTimeout(id)
-}
-
 type rotationChans struct {
 	Rotate  chan struct{}
 	Current chan chan *dns.Conn
@@ -375,13 +364,19 @@ func (r *BaseResolver) periodicRotations(chs *rotationChans) {
 			if last == nil {
 				lch <- nil
 			} else {
-				lch <- &dns.Conn{Conn: last}
+				lch <- &dns.Conn{
+					Conn:    last,
+					UDPSize: dns.DefaultMsgSize,
+				}
 			}
 		case cch := <-chs.Current:
 			if current == nil {
 				cch <- nil
 			} else {
-				cch <- &dns.Conn{Conn: current}
+				cch <- &dns.Conn{
+					Conn:    current,
+					UDPSize: dns.DefaultMsgSize,
+				}
 			}
 		case <-chs.Rotate:
 			if last != nil {
@@ -391,9 +386,7 @@ func (r *BaseResolver) periodicRotations(chs *rotationChans) {
 
 			var err error
 			for {
-				d := &net.Dialer{}
-
-				current, err = d.Dial("udp", r.address+":"+r.port)
+				current, err = amassnet.DialContext(context.TODO(), "udp", r.address+":"+r.port)
 				if err == nil {
 					break
 				}
@@ -408,15 +401,27 @@ func (r *BaseResolver) rotateConnections() {
 }
 
 func (r *BaseResolver) currentConnection() *dns.Conn {
-	ch := make(chan *dns.Conn, 2)
+	for {
+		ch := make(chan *dns.Conn, 2)
 
-	r.rotationChannels.Current <- ch
-	return <-ch
+		r.rotationChannels.Current <- ch
+		co := <-ch
+		if co != nil {
+			return co
+		}
+		return <-ch
+	}
 }
 
 func (r *BaseResolver) lastConnection() *dns.Conn {
-	ch := make(chan *dns.Conn, 2)
+	for {
+		ch := make(chan *dns.Conn, 2)
 
-	r.rotationChannels.Last <- ch
-	return <-ch
+		r.rotationChannels.Last <- ch
+		co := <-ch
+		if co != nil {
+			return co
+		}
+		return <-ch
+	}
 }

@@ -121,6 +121,42 @@ func (s *Script) config(L *lua.LState) int {
 	return 1
 }
 
+func (s *Script) dataSourceConfig(L *lua.LState) int {
+	cfg := s.sys.Config().GetDataSourceConfig(s.String())
+	if cfg == nil {
+		L.Push(lua.LNil)
+		return 1
+	}
+
+	tb := L.NewTable()
+	tb.RawSetString("name", lua.LString(cfg.Name))
+	if cfg.TTL != 0 {
+		tb.RawSetString("ttl", lua.LNumber(cfg.TTL))
+	}
+
+	if creds := cfg.GetCredentials(); creds != nil {
+		c := L.NewTable()
+
+		c.RawSetString("name", lua.LString(creds.Name))
+		if creds.Username != "" {
+			c.RawSetString("username", lua.LString(creds.Username))
+		}
+		if creds.Password != "" {
+			c.RawSetString("password", lua.LString(creds.Password))
+		}
+		if creds.Key != "" {
+			c.RawSetString("key", lua.LString(creds.Key))
+		}
+		if creds.Secret != "" {
+			c.RawSetString("secret", lua.LString(creds.Secret))
+		}
+		tb.RawSetString("credentials", c)
+	}
+
+	L.Push(tb)
+	return 1
+}
+
 // Wrapper so that scripts can obtain the brute force wordlist for the current enumeration.
 func (s *Script) bruteWordlist(L *lua.LState) int {
 	c := L.CheckUserData(1).Value.(*contextWrapper)
@@ -225,18 +261,17 @@ func (s *Script) newName(L *lua.LState) int {
 	}
 
 	lv := L.Get(2)
-	if n, ok := lv.(lua.LString); ok {
-		name := string(n)
-
-		if domain := cfg.WhichDomain(name); domain != "" {
-			bus.Publish(requests.NewNameTopic, eventbus.PriorityHigh, &requests.DNSRequest{
-				Name:   cleanName(name),
-				Domain: domain,
-				Tag:    s.SourceType,
-				Source: s.String(),
-			})
-		}
+	n, ok := lv.(lua.LString)
+	if !ok {
+		return 0
 	}
+
+	name := s.subre.FindString(string(n))
+	if name == "" || s.filter.Duplicate(name) {
+		return 0
+	}
+
+	genNewNameEvent(c.Ctx, s.sys, s, cleanName(name))
 	return 0
 }
 
@@ -536,9 +571,9 @@ func (s *Script) scrape(L *lua.LState) int {
 
 	var resp string
 	// Check for cached responses first
-	api := s.sys.Config().GetAPIKey(s.String())
-	if api != nil && api.TTL > 0 {
-		if r, err := s.getCachedResponse(url, api.TTL); err == nil {
+	dsc := s.sys.Config().GetDataSourceConfig(s.String())
+	if dsc != nil && dsc.TTL > 0 {
+		if r, err := s.getCachedResponse(url, dsc.TTL); err == nil {
 			resp = r
 		}
 	}
@@ -554,16 +589,11 @@ func (s *Script) scrape(L *lua.LState) int {
 		s.setCachedResponse(url, resp)
 	}
 
-	for _, n := range subRE.FindAllString(resp, -1) {
-		name := cleanName(n)
+	for _, name := range subRE.FindAllString(resp, -1) {
+		n := cleanName(name)
 
-		if domain := cfg.WhichDomain(name); domain != "" {
-			bus.Publish(requests.NewNameTopic, eventbus.PriorityHigh, &requests.DNSRequest{
-				Name:   name,
-				Domain: domain,
-				Tag:    s.SourceType,
-				Source: s.String(),
-			})
+		if !s.filter.Duplicate(n) {
+			genNewNameEvent(c.Ctx, s.sys, s, n)
 		}
 	}
 
@@ -593,13 +623,10 @@ func (s *Script) crawl(L *lua.LState) int {
 	}
 
 	for _, name := range names {
-		if domain := cfg.WhichDomain(name); domain != "" {
-			bus.Publish(requests.NewNameTopic, eventbus.PriorityHigh, &requests.DNSRequest{
-				Name:   name,
-				Domain: domain,
-				Tag:    s.SourceType,
-				Source: s.String(),
-			})
+		n := cleanName(name)
+
+		if !s.filter.Duplicate(n) {
+			genNewNameEvent(c.Ctx, s.sys, s, n)
 		}
 	}
 

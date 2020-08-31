@@ -6,13 +6,13 @@ package graph
 import (
 	"strconv"
 
-	"github.com/OWASP/Amass/v3/graphdb"
 	"github.com/OWASP/Amass/v3/net"
 	"github.com/OWASP/Amass/v3/requests"
+	"github.com/OWASP/Amass/v3/stringset"
 )
 
 // InsertAS adds/updates an autonomous system in the graph.
-func (g *Graph) InsertAS(asn, desc, source, tag, eventID string) (graphdb.Node, error) {
+func (g *Graph) InsertAS(asn, desc, source, tag, eventID string) (Node, error) {
 	asNode, err := g.InsertNodeIfNotExist(asn, "as")
 	if err != nil {
 		return asNode, err
@@ -57,7 +57,7 @@ func (g *Graph) InsertInfrastructure(asn int, desc, addr, cidr, source, tag, eve
 	}
 
 	// Create the edge between the CIDR and the address
-	containsEdge := &graphdb.Edge{
+	containsEdge := &Edge{
 		Predicate: "contains",
 		From:      cidrNode,
 		To:        ipNode,
@@ -72,7 +72,7 @@ func (g *Graph) InsertInfrastructure(asn int, desc, addr, cidr, source, tag, eve
 	}
 
 	// Create the edge between the AS and the netblock
-	prefixEdge := &graphdb.Edge{
+	prefixEdge := &Edge{
 		Predicate: "prefix",
 		From:      asNode,
 		To:        cidrNode,
@@ -90,7 +90,7 @@ func (g *Graph) ReadASDescription(asn string) string {
 	return ""
 }
 
-func (g *Graph) nodeDescription(node graphdb.Node) string {
+func (g *Graph) nodeDescription(node Node) string {
 	if p, err := g.db.ReadProperties(node, "description"); err == nil && len(p) > 0 {
 		return p[0].Value
 	}
@@ -98,7 +98,8 @@ func (g *Graph) nodeDescription(node graphdb.Node) string {
 	return ""
 }
 
-func (g *Graph) asnCacheFill(cache *net.ASNCache) error {
+// ASNCacheFill populates an ASNCache object with the AS data in the receiver object.
+func (g *Graph) ASNCacheFill(cache *net.ASNCache) error {
 	nodes, err := g.AllNodesOfType("as")
 	if err != nil {
 		return err
@@ -115,12 +116,17 @@ func (g *Graph) asnCacheFill(cache *net.ASNCache) error {
 		}
 
 		for _, edge := range edges {
+			netblock := stringset.New()
 			cidr := g.db.NodeToID(edge.To)
 
+			netblock.Insert(cidr)
 			cache.Update(&requests.ASNRequest{
 				ASN:         asn,
 				Prefix:      cidr,
+				Netblocks:   netblock,
 				Description: desc,
+				Tag:         requests.RIR,
+				Source:      g.String(),
 			})
 		}
 	}

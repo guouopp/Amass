@@ -15,7 +15,6 @@ import (
 	"github.com/OWASP/Amass/v3/config"
 	"github.com/OWASP/Amass/v3/graph"
 	"github.com/OWASP/Amass/v3/requests"
-	"github.com/OWASP/Amass/v3/stringfilter"
 	"github.com/OWASP/Amass/v3/stringset"
 	"github.com/fatih/color"
 )
@@ -120,6 +119,7 @@ func runTrackCommand(clArgs []string) {
 	rand.Seed(time.Now().UTC().UnixNano())
 
 	cfg := new(config.Config)
+	cfg.LocalDatabase = true
 	// Check if a configuration file was provided, and if so, load the settings
 	if err := config.AcquireConfig(args.Filepaths.Directory, args.Filepaths.ConfigFile, cfg); err == nil {
 		if args.Filepaths.Directory == "" {
@@ -141,8 +141,15 @@ func runTrackCommand(clArgs []string) {
 	}
 	defer db.Close()
 
+	// Create the in-memory graph database
+	memDB, err := memGraphForScope(args.Domains.Slice(), db)
+	if err != nil {
+		r.Fprintln(color.Error, err.Error())
+		os.Exit(1)
+	}
+
 	// Get all the UUIDs for events that have information in scope
-	uuids := eventUUIDs(args.Domains.Slice(), db)
+	uuids := eventUUIDs(args.Domains.Slice(), memDB)
 	if len(uuids) == 0 {
 		r.Fprintln(color.Error, "Failed to find the domains of interest in the database")
 		os.Exit(1)
@@ -150,7 +157,7 @@ func runTrackCommand(clArgs []string) {
 
 	var earliest, latest []time.Time
 	// Put the events in chronological order
-	uuids, earliest, latest = orderedEvents(uuids, db)
+	uuids, earliest, latest = orderedEvents(uuids, memDB)
 	if len(uuids) == 0 {
 		r.Fprintln(color.Error, "Failed to sort the events")
 		os.Exit(1)
@@ -166,14 +173,14 @@ func runTrackCommand(clArgs []string) {
 		args.Last = len(uuids)
 	}
 
-	var end int
+	var begin int
 	// Filter out enumerations that begin before the start date/time
 	if args.Since != "" {
 		for i := len(uuids) - 1; i >= 0; i-- {
-			if !earliest[i].Before(start) {
+			if earliest[i].Before(start) {
 				break
 			}
-			end++
+			begin++
 		}
 	} else { // Or the number of enumerations from the end of the timeline
 		if args.Last > len(uuids) {
@@ -181,18 +188,12 @@ func runTrackCommand(clArgs []string) {
 			os.Exit(1)
 		}
 
-		end = args.Last
+		begin = args.Last
 	}
-	uuids = uuids[:end]
-	earliest = earliest[:end]
-	latest = latest[:end]
-
-	// Create the in-memory graph database
-	memDB, err := memGraphForEvents(uuids, db)
-	if err != nil {
-		r.Fprintln(color.Error, err.Error())
-		os.Exit(1)
-	}
+	begin = len(uuids) - begin
+	uuids = uuids[begin:]
+	earliest = earliest[begin:]
+	latest = latest[begin:]
 
 	if args.Options.History {
 		completeHistoryOutput(uuids, args.Domains.Slice(), earliest, latest, memDB)
@@ -203,16 +204,7 @@ func runTrackCommand(clArgs []string) {
 
 func cumulativeOutput(uuids, domains []string, ea, la []time.Time, db *graph.Graph) {
 	idx := len(uuids) - 1
-	filter := stringfilter.NewStringFilter()
-
-	var cum []*requests.Output
-	for i := idx - 1; i >= 0; i-- {
-		for _, out := range getEventOutput([]string{uuids[i]}, db) {
-			if domainNameInScope(out.Name, domains) && !filter.Duplicate(out.Name) {
-				cum = append(cum, out)
-			}
-		}
-	}
+	cum := getScopedOutput(uuids[:idx], domains, db)
 
 	blueLine()
 	fmt.Fprintf(color.Output, "%s\t%s%s%s\n%s\t%s%s%s\n", blue("Between"),
@@ -284,46 +276,40 @@ func blueLine() {
 	fmt.Println()
 }
 
-func diffEnumOutput(out1, out2 []*requests.Output) []string {
-	omap1 := make(map[string]*requests.Output)
-	omap2 := make(map[string]*requests.Output)
+func diffEnumOutput(older, newer []*requests.Output) []string {
+	oldmap := make(map[string]*requests.Output)
+	newmap := make(map[string]*requests.Output)
 
-	for _, o := range out1 {
-		omap1[o.Name] = o
+	for _, o := range older {
+		oldmap[o.Name] = o
 	}
-	for _, o := range out2 {
-		omap2[o.Name] = o
+	for _, o := range newer {
+		newmap[o.Name] = o
 	}
 
-	handled := make(map[string]struct{})
 	var diff []string
-	for _, o := range out1 {
-		handled[o.Name] = struct{}{}
-
-		if _, found := omap2[o.Name]; !found {
+	for name, o := range newmap {
+		o2, found := oldmap[name]
+		if !found {
 			diff = append(diff, fmt.Sprintf("%s%s %s", blue("Found: "),
-				green(o.Name), yellow(lineOfAddresses(o.Addresses))))
+				green(name), yellow(lineOfAddresses(o.Addresses))))
 			continue
 		}
 
-		o2 := omap2[o.Name]
 		if !compareAddresses(o.Addresses, o2.Addresses) {
 			diff = append(diff, fmt.Sprintf("%s%s\n\t%s\t%s\n\t%s\t%s", blue("Moved: "),
-				green(o.Name), blue(" from "), yellow(lineOfAddresses(o2.Addresses)),
+				green(name), blue(" from "), yellow(lineOfAddresses(o2.Addresses)),
 				blue(" to "), yellow(lineOfAddresses(o.Addresses))))
 		}
 	}
 
-	for _, o := range out2 {
-		if _, found := handled[o.Name]; found {
-			continue
-		}
-
-		if _, found := omap1[o.Name]; !found {
+	for name, o := range oldmap {
+		if _, found := newmap[name]; !found {
 			diff = append(diff, fmt.Sprintf("%s%s %s", blue("Removed: "),
-				green(o.Name), yellow(lineOfAddresses(o.Addresses))))
+				green(name), yellow(lineOfAddresses(o.Addresses))))
 		}
 	}
+
 	return diff
 }
 

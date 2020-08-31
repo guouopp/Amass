@@ -6,6 +6,7 @@ package datasrcs
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"strings"
@@ -24,9 +25,9 @@ import (
 type Umbrella struct {
 	requests.BaseService
 
-	API        *config.APIKey
 	SourceType string
 	sys        systems.System
+	creds      *config.Credentials
 }
 
 // NewUmbrella returns he object initialized, but not yet started.
@@ -49,12 +50,25 @@ func (u *Umbrella) Type() string {
 func (u *Umbrella) OnStart() error {
 	u.BaseService.OnStart()
 
-	u.API = u.sys.Config().GetAPIKey(u.String())
-	if u.API == nil || u.API.Key == "" {
+	u.creds = u.sys.Config().GetDataSourceConfig(u.String()).GetCredentials()
+	if u.creds == nil || u.creds.Key == "" {
 		u.sys.Config().Log.Printf("%s: API key data was not provided", u.String())
 	}
 
 	u.SetRateLimit(500 * time.Millisecond)
+	return nil
+}
+
+// CheckConfig implements the Service interface.
+func (u *Umbrella) CheckConfig() error {
+	creds := u.sys.Config().GetDataSourceConfig(u.String()).GetCredentials()
+
+	if creds == nil || creds.Key == "" {
+		estr := fmt.Sprintf("%s: check callback failed for the configuration", u.String())
+		u.sys.Config().Log.Print(estr)
+		return errors.New(estr)
+	}
+
 	return nil
 }
 
@@ -66,7 +80,7 @@ func (u *Umbrella) OnDNSRequest(ctx context.Context, req *requests.DNSRequest) {
 		return
 	}
 
-	if u.API == nil || u.API.Key == "" {
+	if u.creds == nil || u.creds.Key == "" {
 		return
 	}
 
@@ -97,14 +111,7 @@ func (u *Umbrella) OnDNSRequest(ctx context.Context, req *requests.DNSRequest) {
 	}
 
 	for _, m := range subs.Matches {
-		if d := cfg.WhichDomain(m.Name); d != "" {
-			bus.Publish(requests.NewNameTopic, eventbus.PriorityHigh, &requests.DNSRequest{
-				Name:   m.Name,
-				Domain: d,
-				Tag:    u.SourceType,
-				Source: u.String(),
-			})
-		}
+		genNewNameEvent(ctx, u.sys, u, m.Name)
 	}
 }
 
@@ -116,7 +123,7 @@ func (u *Umbrella) OnAddrRequest(ctx context.Context, req *requests.AddrRequest)
 		return
 	}
 
-	if u.API == nil || u.API.Key == "" {
+	if u.creds == nil || u.creds.Key == "" {
 		return
 	}
 
@@ -146,14 +153,7 @@ func (u *Umbrella) OnAddrRequest(ctx context.Context, req *requests.AddrRequest)
 
 	for _, record := range ip.Records {
 		if name := resolvers.RemoveLastDot(record.Data); name != "" {
-			if domain := cfg.WhichDomain(name); domain != "" {
-				bus.Publish(requests.NewNameTopic, eventbus.PriorityHigh, &requests.DNSRequest{
-					Name:   name,
-					Domain: req.Domain,
-					Tag:    u.SourceType,
-					Source: u.String(),
-				})
-			}
+			genNewNameEvent(ctx, u.sys, u, name)
 		}
 	}
 }
@@ -165,7 +165,7 @@ func (u *Umbrella) OnASNRequest(ctx context.Context, req *requests.ASNRequest) {
 		return
 	}
 
-	if u.API == nil || u.API.Key == "" {
+	if u.creds == nil || u.creds.Key == "" {
 		return
 	}
 
@@ -418,7 +418,7 @@ func (u *Umbrella) queryReverseWhois(ctx context.Context, apiURL string) []strin
 					}
 				}
 			}
-			if result.MoreData && more == false {
+			if result.MoreData && !more {
 				more = true
 			}
 		}
@@ -446,7 +446,7 @@ func (u *Umbrella) OnWhoisRequest(ctx context.Context, req *requests.WhoisReques
 		return
 	}
 
-	if u.API == nil || u.API.Key == "" {
+	if u.creds == nil || u.creds.Key == "" {
 		return
 	}
 
@@ -498,8 +498,8 @@ func (u *Umbrella) OnWhoisRequest(ctx context.Context, req *requests.WhoisReques
 func (u *Umbrella) restHeaders() map[string]string {
 	headers := map[string]string{"Content-Type": "application/json"}
 
-	if u.API != nil && u.API.Key != "" {
-		headers["Authorization"] = "Bearer " + u.API.Key
+	if u.creds == nil || u.creds.Key == "" {
+		headers["Authorization"] = "Bearer " + u.creds.Key
 	}
 	return headers
 

@@ -79,8 +79,6 @@ func (s *ShadowServer) OnASNRequest(ctx context.Context, req *requests.ASNReques
 	}
 
 	s.CheckRateLimit()
-	bus.Publish(requests.SetActiveTopic, eventbus.PriorityCritical, s.String())
-
 	if req.Address != "" {
 		s.executeASNAddrQuery(ctx, req.Address)
 		return
@@ -101,8 +99,6 @@ func (s *ShadowServer) executeASNQuery(ctx context.Context, asn int) {
 	}
 
 	s.CheckRateLimit()
-	bus.Publish(requests.SetActiveTopic, eventbus.PriorityCritical, s.String())
-
 	req := s.origin(ctx, strings.Trim(blocks.Slice()[0], "/"))
 	if req == nil {
 		return
@@ -124,8 +120,6 @@ func (s *ShadowServer) executeASNAddrQuery(ctx context.Context, addr string) {
 	}
 
 	s.CheckRateLimit()
-	bus.Publish(requests.SetActiveTopic, eventbus.PriorityCritical, s.String())
-
 	req.Netblocks.Union(s.netblocks(ctx, req.ASN))
 	bus.Publish(requests.NewASNTopic, eventbus.PriorityHigh, req)
 }
@@ -211,8 +205,7 @@ func (s *ShadowServer) netblocks(ctx context.Context, asn int) stringset.Set {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	d := net.Dialer{}
-	conn, err := d.DialContext(ctx, "tcp", s.addr+":43")
+	conn, err := amassnet.DialContext(ctx, "tcp", s.addr+":43")
 	if err != nil {
 		bus.Publish(requests.LogTopic, eventbus.PriorityHigh, fmt.Sprintf("%s: %v", s.String(), err))
 		return netblocks

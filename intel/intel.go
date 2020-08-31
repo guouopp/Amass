@@ -53,7 +53,7 @@ type Collection struct {
 func NewCollection(sys systems.System) *Collection {
 	c := &Collection{
 		Config: config.NewConfig(),
-		Bus:    eb.NewEventBus(1000),
+		Bus:    eb.NewEventBus(),
 		Sys:    sys,
 		srcs:   stringset.New(),
 		Output: make(chan *requests.Output, 100),
@@ -111,16 +111,16 @@ func (c *Collection) HostedDomains() error {
 		time.AfterFunc(time.Duration(c.Config.Timeout)*time.Minute, func() {
 			c.Config.Log.Printf("Enumeration exceeded provided timeout")
 			close(c.Output)
-			return
 		})
 	}
 
 	c.filter = stringfilter.NewStringFilter()
 	// Start the address ranges
 	for _, addr := range c.Config.Addresses {
-		c.Config.SemMaxDNSQueries.Acquire(1)
-		c.wg.Add(1)
-		go c.investigateAddr(addr.String())
+		if c.Sys.PerformDNSQuery(ctx) == nil {
+			c.wg.Add(1)
+			go c.investigateAddr(addr.String())
+		}
 	}
 
 	for _, cidr := range append(c.Config.CIDRs, c.asnsToCIDRs()...) {
@@ -130,9 +130,10 @@ func (c *Collection) HostedDomains() error {
 		}
 
 		for _, addr := range amassnet.AllHosts(cidr) {
-			c.Config.SemMaxDNSQueries.Acquire(1)
-			c.wg.Add(1)
-			go c.investigateAddr(addr.String())
+			if c.Sys.PerformDNSQuery(ctx) == nil {
+				c.wg.Add(1)
+				go c.investigateAddr(addr.String())
+			}
 		}
 	}
 
@@ -171,7 +172,7 @@ func (c *Collection) resolution(t time.Time, rcode int) {
 
 func (c *Collection) investigateAddr(addr string) {
 	defer c.wg.Done()
-	defer c.Config.SemMaxDNSQueries.Release(1)
+	defer c.Sys.FinishedDNSQuery()
 
 	ip := net.ParseIP(addr)
 	if ip == nil {
@@ -187,7 +188,7 @@ func (c *Collection) investigateAddr(addr string) {
 					Domain:    d,
 					Addresses: []requests.AddressInfo{addrinfo},
 					Tag:       requests.DNS,
-					Source:    "Reverse DNS",
+					Sources:   []string{"Reverse DNS"},
 				}
 			}
 		}
@@ -207,7 +208,7 @@ func (c *Collection) investigateAddr(addr string) {
 					Domain:    d,
 					Addresses: []requests.AddressInfo{addrinfo},
 					Tag:       requests.CERT,
-					Source:    "Active Cert",
+					Sources:   []string{"Active Cert"},
 				}
 			}
 		}
@@ -265,7 +266,7 @@ loop:
 			l := last
 			lastLock.Unlock()
 
-			if time.Now().Sub(l) > 20*time.Second {
+			if time.Since(l) > 20*time.Second {
 				break loop
 			}
 		}
@@ -299,10 +300,10 @@ func (c *Collection) ReverseWhois() error {
 		for _, d := range req.NewDomains {
 			if !filter.Duplicate(d) {
 				c.Output <- &requests.Output{
-					Name:   d,
-					Domain: d,
-					Tag:    req.Tag,
-					Source: req.Source,
+					Name:    d,
+					Domain:  d,
+					Tag:     req.Tag,
+					Sources: []string{req.Source},
 				}
 			}
 		}
@@ -353,7 +354,7 @@ loop:
 		case <-c.done:
 			break loop
 		case <-t.C:
-			if l := c.lastActive(); time.Now().Sub(l) > 10*time.Second {
+			if l := c.lastActive(); time.Since(l) > 10*time.Second {
 				break loop
 			}
 		}
